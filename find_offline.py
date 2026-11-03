@@ -243,6 +243,33 @@ def detect(frames, bits, outlier, neighbor):
     return flagged
 
 
+def is_head_pop_tc(tc):
+    """True for HH:59:58:00, the head 2-pop position before an hour start."""
+    return tc[3:8] == "59:58" and tc[9:] == "00"
+
+
+def split_pops(flagged, frames, start_frames, nominal, drop, fps, tail_secs):
+    """Move single-frame OUTLIERs that look like 2-pops out of `flagged`.
+
+    Head pop: lands exactly on HH:59:58:00.  Tail pop: falls within the
+    last `tail_secs` seconds of the file.  RED frames are never excused.
+    """
+    tail_start = len(frames) - int(round(tail_secs * float(fps)))
+    pops = {}
+    for i in list(flagged):
+        if flagged[i] != ["OUTLIER"]:
+            continue
+        tc = frames_to_tc(frames[i]["frame"] + start_frames, nominal, drop)
+        if is_head_pop_tc(tc):
+            pops[i] = "head"
+        elif tail_secs > 0 and i >= tail_start:
+            pops[i] = "tail"
+        else:
+            continue
+        del flagged[i]
+    return pops
+
+
 # --------------------------------------------------------------------------
 # Per-file driver
 # --------------------------------------------------------------------------
@@ -289,6 +316,15 @@ def process(path, args):
         if not frames:
             raise RuntimeError("no frames parsed from signalstats output")
         flagged = detect(frames, info["bits"], args.outlier, args.neighbor)
+        pops = split_pops(flagged, frames, start_frames, nominal, drop, fps,
+                          args.tail_pop)
+
+        def frame_line(i, label):
+            fr = frames[i]
+            tc = frames_to_tc(fr["frame"] + start_frames, nominal, drop)
+            return (f"    frame {fr['frame']:>8}  TC {tc}  [{label}]  "
+                    f"Y={fr.get('YAVG', 0):.0f} U={fr.get('UAVG', 0):.0f} "
+                    f"V={fr.get('VAVG', 0):.0f}")
 
         out(f"  analyzed {len(frames)} frames")
         if not flagged:
@@ -296,12 +332,11 @@ def process(path, args):
         else:
             out(f"  RESULT: {len(flagged)} suspect frame(s)")
             for i in sorted(flagged):
-                fr = frames[i]
-                tc = frames_to_tc(fr["frame"] + start_frames, nominal, drop)
-                out(f"    frame {fr['frame']:>8}  TC {tc}  "
-                    f"[{', '.join(flagged[i])}]  "
-                    f"Y={fr.get('YAVG', 0):.0f} U={fr.get('UAVG', 0):.0f} "
-                    f"V={fr.get('VAVG', 0):.0f}")
+                out(frame_line(i, ", ".join(flagged[i])))
+        if pops:
+            out(f"  NOTICE: {len(pops)} likely 2-pop frame(s) (not counted as suspect)")
+            for i in sorted(pops):
+                out(frame_line(i, f"likely 2-POP ({pops[i]})"))
         if not args.temp_stats:
             report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
             out(f"  stats:  {stats_path}")
@@ -309,7 +344,7 @@ def process(path, args):
     finally:
         if tmpdir:
             shutil.rmtree(tmpdir, ignore_errors=True)
-    return len(flagged)
+    return len(flagged), len(pops)
 
 
 def collect_inputs(args):
@@ -347,6 +382,9 @@ def main():
                     help="min YUV distance (8-bit scale) from both neighbors")
     ap.add_argument("--neighbor", type=float, default=15.0,
                     help="max YUV distance between prev and next frames")
+    ap.add_argument("--tail-pop", type=float, default=3.0, metavar="SECS",
+                    help="treat a lone outlier in the last SECS seconds as a "
+                         "likely tail 2-pop (0 disables; default 3)")
     args = ap.parse_args()
 
     for tool in ("ffmpeg", "ffprobe"):
@@ -357,7 +395,7 @@ def main():
     if not files:
         ap.error("no input files (give files and/or --input-directory)")
 
-    results = []  # (name, suspects or None on error)
+    results = []  # (name, (suspects, pops) or None on error)
     for f in files:
         try:
             results.append((f.name, process(f, args)))
@@ -368,13 +406,19 @@ def main():
 
     if len(files) > 1:
         print("=== SUMMARY")
-        for name, n in results:
-            status = "ERROR" if n is None else ("clean" if n == 0 else f"{n} suspect frame(s)")
+        for name, r in results:
+            if r is None:
+                status = "ERROR"
+            else:
+                n, pops = r
+                status = "clean" if n == 0 else f"{n} suspect frame(s)"
+                if pops:
+                    status += f" ({pops} likely 2-pop)"
             print(f"  {name}: {status}")
 
-    if any(n is None for _, n in results):
+    if any(r is None for _, r in results):
         sys.exit(2)
-    sys.exit(1 if any(n for _, n in results) else 0)
+    sys.exit(1 if any(r[0] for _, r in results) else 0)
 
 
 if __name__ == "__main__":

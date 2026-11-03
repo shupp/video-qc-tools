@@ -72,6 +72,7 @@ Each flagged frame shows its 0-based frame number, its timecode (including the f
 | `--reuse` | If an up-to-date stats file already exists for a video, skip ffmpeg and re-analyze from it. Useful when tuning thresholds. |
 | `--outlier N` | Minimum distance from both neighbors for the outlier test. Default `40`. |
 | `--neighbor N` | Maximum distance between the previous and next frames for the outlier test. Default `15`. |
+| `--tail-pop SECS` | Treat a lone outlier frame in the last `SECS` seconds of the file as a likely tail 2-pop. `0` disables. Default `3`. |
 
 Directory scanning picks up these extensions (case-insensitive): `.mov .mp4 .m4v .mxf .mkv .avi .mpg .mpeg .mts .m2ts .webm`. Hidden files (names starting with `.`) are skipped.
 
@@ -89,7 +90,7 @@ The full video filename, including its extension, is part of the name, so `a.mov
 | Code | Meaning |
 | --- | --- |
 | `0` | All files clean |
-| `1` | At least one suspect frame was found |
+| `1` | At least one suspect frame was found (likely 2-pops do not count) |
 | `2` | At least one file failed to process (other files are still processed) |
 
 This makes it easy to use in a script or pre-delivery checklist:
@@ -106,6 +107,13 @@ Two independent tests are run on every frame. Values are normalized to an 8-bit 
 2. **OUTLIER**: the frame differs by more than `--outlier` (sum of Y, U, and V average differences) from both the previous and next frames, while those two neighbors are similar to each other (within `--neighbor`). This catches any one-frame flash or glitch, not just red ones, and does not trigger on normal hard cuts.
 
 A frame is reported if either test fires.
+
+**2-pops.** A frame flagged only by the OUTLIER test is reported as a `NOTICE` (`likely 2-POP`) instead of a suspect frame when either:
+
+- its timecode is exactly `HH:59:58:00` (the head pop, two seconds before an hour start), or
+- it falls within the last `--tail-pop` seconds of the file (the tail pop).
+
+These notices appear in the report and summary but do not affect the exit code. A frame that also trips the RED test is always a suspect.
 
 ### Automatic detection details
 
